@@ -7,10 +7,10 @@ _EPS = 1e-7
 
 
 class _TTransform(torch.distributions.Transform):
-    
+
     domain = torch.distributions.constraints.real
     codomain = torch.distributions.constraints.real
-    
+
     def _call(self, x):
         t = x[..., 0].unsqueeze(-1)
         v = x[..., 1:]
@@ -27,10 +27,10 @@ class _TTransform(torch.distributions.Transform):
 
 
 class _HouseholderRotationTransform(torch.distributions.Transform):
-    
+
     domain = torch.distributions.constraints.real
     codomain = torch.distributions.constraints.real
-    
+
     def __init__(self, loc):
         super().__init__()
         self.loc = loc
@@ -58,7 +58,9 @@ class HypersphericalUniform(torch.distributions.Distribution):
     }
 
     def __init__(self, dim, device="cpu", dtype=torch.float32, validate_args=None):
-        self.dim = dim if isinstance(dim, torch.Tensor) else torch.tensor(dim, device=device)
+        self.dim = (
+            dim if isinstance(dim, torch.Tensor) else torch.tensor(dim, device=device)
+        )
         super().__init__(validate_args=validate_args)
         self.device, self.dtype = device, dtype
 
@@ -96,7 +98,11 @@ class MarginalTDistribution(torch.distributions.TransformedDistribution):
     has_rsample = True
 
     def __init__(self, dim, scale, validate_args=None):
-        self.dim = dim if isinstance(dim, torch.Tensor) else torch.tensor(dim, device=scale.device)
+        self.dim = (
+            dim
+            if isinstance(dim, torch.Tensor)
+            else torch.tensor(dim, device=scale.device)
+        )
         self.scale = scale
         super().__init__(
             torch.distributions.Beta(
@@ -104,7 +110,6 @@ class MarginalTDistribution(torch.distributions.TransformedDistribution):
             ),
             transforms=torch.distributions.AffineTransform(loc=-1, scale=2),
         )
-        
 
     def entropy(self):
         return self.base_dist.entropy() + math.log(2)
@@ -171,22 +176,31 @@ class PowerSpherical(torch.distributions.TransformedDistribution):
             ),
             [_TTransform(), _HouseholderRotationTransform(loc),],
         )
-        
 
     def log_prob(self, value):
-        return self.log_normalizer() + self.scale * torch.log1p(
-            (self.loc * value).sum(-1)
+        unnormalized_logp = self.scale * torch.log1p(
+            torch.clamp((self.loc * value).sum(-1), min=1e-6 - 1.0, max=1.0 - 1e-6)
         )
+        unnormalized_logp = torch.logaddexp(
+            unnormalized_logp, torch.full_like(unnormalized_logp, math.log(1e-4)),
+        )
+        return self.log_normalizer() + unnormalized_logp
 
     def log_normalizer(self):
         alpha = self.base_dist.marginal_t.base_dist.concentration1
         beta = self.base_dist.marginal_t.base_dist.concentration0
-        return -(
+        ps_normalizer = -(
             (alpha + beta) * math.log(2)
             + torch.lgamma(alpha)
             - torch.lgamma(alpha + beta)
             + beta * math.log(math.pi)
         )
+        hu_normalizer = torch.full_like(
+            ps_normalizer,
+            math.lgamma(self.base_dist.marginal_t.dim / 2)
+            - (math.log(2) + (self.base_dist.marginal_t.dim / 2) * math.log(math.pi)),
+        )
+        return -torch.logaddexp(-ps_normalizer, -hu_normalizer + math.log(1e-4))
 
     def entropy(self):
         alpha = self.base_dist.marginal_t.base_dist.concentration1
